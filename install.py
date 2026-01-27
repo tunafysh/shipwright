@@ -88,7 +88,7 @@ CORE_UTILS = [
     "fastfetch",
     "rsync", "ddrescue",
     "zip", "unzip", "unrar", "p7zip", "lzop",
-    "fwupd", "xdg-user-dirs", "os-prober",
+    "fwupd", "xdg-user-dirs", "os-prober", "pacman",
 ]
 
 NETWORK_TOOLS = [
@@ -205,14 +205,62 @@ def install_base_system(desktop_choice):
     run("pacstrap /mnt " + " ".join(build_package_list(desktop_choice)))
     write_hardware_manifest()
 
+def fix_mkinitcpio_hooks():
+    mkinit = "/mnt/etc/mkinitcpio.conf"
+    if not os.path.exists(mkinit):
+        print(f"{RED}mkinitcpio.conf not found at {mkinit}{RESET}")
+        return
+
+    # 1. Check if 'encrypt' already exists
+    hooks = sh(f"grep '^HOOKS=' {mkinit}")
+    if "encrypt" in hooks:
+        print(f"{GREEN}encrypt hook already present in mkinitcpio.conf{RESET}")
+        return
+
+    # 2. Insert 'encrypt' before 'filesystems'
+    cmd = f"sed -i 's/filesystems/encrypt filesystems/' {mkinit}"
+    run(cmd)
+
+    # 3. Regenerate initramfs
+    print(f"{BLUE}Regenerating initramfs...{RESET}")
+    run("arch-chroot /mnt mkinitcpio -P")
+
 def configure_system(hostname="mothership", desktop_choice="1"):
+    # ---------- Basic system config ----------
+    print(f"{CYAN}Configuring system...{RESET}")
+
+    # Hostname
     run(f"arch-chroot /mnt bash -c 'echo {hostname} > /etc/hostname'")
+
+    # Timezone
     run("arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Tirane /etc/localtime")
     run("arch-chroot /mnt hwclock --systohc")
+
+    # Locale
     run("arch-chroot /mnt bash -c 'echo en_US.UTF-8 UTF-8 > /etc/locale.gen'")
     run("arch-chroot /mnt locale-gen")
     run("arch-chroot /mnt bash -c 'echo LANG=en_US.UTF-8 > /etc/locale.conf'")
 
+    # ---------- vconsole ----------
+    vconsole_path = "/mnt/etc/vconsole.conf"
+    os.makedirs("/mnt/etc", exist_ok=True)
+    vconsole_content = """KEYMAP=us
+FONT=ter-132n
+"""
+    with open(vconsole_path, "w") as f:
+        f.write(vconsole_content)
+    print(f"{GREEN}vconsole.conf created at {vconsole_path}{RESET}")
+
+    # ---------- Pacman config ----------
+    pacman_conf = "/etc/pacman.conf"
+    # Uncomment Color
+    run(f"arch-chroot /mnt sed -i 's/^#Color/Color/' {pacman_conf}")
+    # Add ILoveCandy if missing
+    if "ILoveCandy" not in sh(f"grep -i 'ILoveCandy' {pacman_conf} || true"):
+        run(f"arch-chroot /mnt bash -c 'echo ILoveCandy >> {pacman_conf}'")
+    print(f"{GREEN}Pacman configured with Color and ILoveCandy.{RESET}")
+
+    # ---------- Enable services ----------
     hw = detect_hardware()
     services = ["NetworkManager", "sshd"]
 
@@ -228,6 +276,9 @@ def configure_system(hostname="mothership", desktop_choice="1"):
 
     for s in services:
         run(f"arch-chroot /mnt systemctl enable {s}")
+
+    print(f"{GREEN}System configuration complete!{RESET}")
+
 
 def install_bootloader():
     # Install GRUB and efibootmgr
@@ -268,6 +319,7 @@ def run_steps(efi, format_efi, root, desktop_choice):
         Step("Install base system", lambda: install_base_system(desktop_choice)),
         Step("Create crypttab", lambda: create_crypttab(root)),
         Step("Configure system", lambda: configure_system(desktop_choice=desktop_choice)),
+        Step("Fix mkinitcpio hooks", fix_mkinitcpio_hooks),
         Step("Install bootloader", install_bootloader),
     ]
 
