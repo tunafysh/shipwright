@@ -88,13 +88,13 @@ CORE_UTILS = [
     "fastfetch",
     "rsync", "ddrescue",
     "zip", "unzip", "unrar", "p7zip", "lzop",
-    "fwupd", "xdg-user-dirs",
+    "fwupd", "xdg-user-dirs", "os-prober",
 ]
 
 NETWORK_TOOLS = [
     "openssh", "nmap", "speedtest-cli", "arp-scan",
     "wavemon", "bind-tools", "traceroute",
-    "dsniff", "mitmproxy", "links",
+    "dsniff", "mitmproxy", "links", "sshfs",
 ]
 
 DEV_PACKAGES = ["base-devel"]
@@ -230,9 +230,21 @@ def configure_system(hostname="mothership", desktop_choice="1"):
         run(f"arch-chroot /mnt systemctl enable {s}")
 
 def install_bootloader():
-    run("arch-chroot /mnt pacman -S --noconfirm grub efibootmgr")
+    # Install GRUB and efibootmgr
+    run("arch-chroot /mnt pacman -S --noconfirm grub efibootmgr os-prober")
+
+    # Enable cryptodisk and OS prober in /etc/default/grub
+    run("arch-chroot /mnt sed -i 's/#GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub || "
+        "echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub")
+    run("arch-chroot /mnt sed -i 's/#GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub || "
+        "echo 'GRUB_DISABLE_OS_PROBER=false' >> /etc/default/grub")
+
+    # Install GRUB to EFI
     run("arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB")
+
+    # Generate the GRUB config
     run("arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg")
+
 
 # ---------- Step System ----------
 class Step:
