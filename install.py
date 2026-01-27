@@ -1,97 +1,294 @@
+#!/usr/bin/env python3
 import subprocess
-from colorama import init, Fore, Style
+import os
+import platform
+import yaml
+import sys
 
-# Initialize colorama
-init(autoreset=True)
+# ---------- ANSI Colors ----------
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
 
-# ---------- Helper functions ----------
+# ---------- Helpers ----------
 def run(cmd):
-    print(Fore.CYAN + f"[RUN] {cmd}")
+    print(f"{CYAN}[RUN] {cmd}{RESET}")
     subprocess.run(cmd, shell=True, check=True)
 
+def sh(cmd):
+    return subprocess.check_output(cmd, shell=True, text=True).strip()
+
+# ---------- Hardware Detection ----------
+def detect_cpu():
+    info = sh("lscpu")
+    vendor = "unknown"
+    if "GenuineIntel" in info:
+        vendor = "intel"
+    elif "AuthenticAMD" in info:
+        vendor = "amd"
+    model = sh("grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2").strip()
+    return {"vendor": vendor, "model": model}
+
+def detect_microcode():
+    v = detect_cpu()["vendor"]
+    return "intel-ucode" if v == "intel" else "amd-ucode" if v == "amd" else None
+
+def detect_gpu():
+    pci = sh("lspci").lower()
+    if "nvidia" in pci:
+        return {"vendor": "nvidia", "packages": ["nvidia", "nvidia-utils"]}
+    if "amd" in pci:
+        return {"vendor": "amd", "packages": ["mesa", "xf86-video-amdgpu"]}
+    if "intel" in pci:
+        return {"vendor": "intel", "packages": ["mesa", "xf86-video-intel"]}
+    return {"vendor": "unknown", "packages": []}
+
+def has_bluetooth():
+    return "bluetooth" in (sh("lsusb") + sh("lspci")).lower()
+
+def has_wifi():
+    return "wireless" in sh("lspci").lower() or "wlan" in sh("ip link")
+
+def is_laptop():
+    return os.path.exists("/sys/class/power_supply/BAT0")
+
+def detect_hardware():
+    return {
+        "cpu": detect_cpu(),
+        "microcode": detect_microcode(),
+        "gpu": detect_gpu(),
+        "bluetooth": has_bluetooth(),
+        "wifi": has_wifi(),
+        "laptop": is_laptop(),
+        "arch": platform.machine(),
+        "uefi": os.path.exists("/sys/firmware/efi"),
+    }
+
+# ---------- Hardware Manifest ----------
+def write_hardware_manifest():
+    hw = detect_hardware()
+    os.makedirs("/mnt/root", exist_ok=True)
+    with open("/mnt/root/hardware.yaml", "w") as f:
+        yaml.dump(hw, f, sort_keys=False)
+    print(f"{GREEN}Hardware manifest written to /mnt/root/hardware.yaml{RESET}")
+
+# ---------- Packages ----------
+BASE_PACKAGES = [
+    "base", "linux", "linux-firmware", "sudo",
+    "networkmanager", "btrfs-progs",
+]
+
+CORE_UTILS = [
+    "git", "vim", "wget", "zsh", "bash-completion",
+    "htop", "btop", "nmon", "mc",
+    "usbutils", "lsof", "dmidecode",
+    "fastfetch",
+    "rsync", "ddrescue",
+    "zip", "unzip", "unrar", "p7zip", "lzop",
+    "fwupd", "xdg-user-dirs",
+]
+
+NETWORK_TOOLS = [
+    "openssh", "nmap", "speedtest-cli", "arp-scan",
+    "wavemon", "bind-tools", "traceroute",
+    "dsniff", "mitmproxy", "links",
+]
+
+DEV_PACKAGES = ["base-devel"]
+
+KDE_LEAN = [
+    "plasma",
+    "sddm",
+    "kde-system-meta",
+    "kde-utilities-meta",
+    "networkmanager-qt",
+    "plasma-nm",
+    "powerdevil",
+    "kscreen",
+    "kpipewire",
+    "pipewire",
+    "pipewire-alsa",
+    "pipewire-pulse",
+    "wireplumber",
+    "polkit-kde-agent",
+    "xdg-desktop-portal",
+    "xdg-desktop-portal-kde",
+    "ttf-dejavu",
+    "ttf-liberation",
+    "noto-fonts",
+]
+
+GNOME_LEAN = [
+    "gnome-shell",
+    "gnome-control-center",
+    "gnome-terminal",
+    "nautilus",
+    "gdm",
+    "pipewire",
+    "pipewire-alsa",
+    "pipewire-pulse",
+    "wireplumber",
+    "xdg-desktop-portal",
+    "xdg-desktop-portal-gnome",
+]
+
+def hardware_packages(hw):
+    pkgs = []
+    if hw["microcode"]:
+        pkgs.append(hw["microcode"])
+    pkgs += hw["gpu"]["packages"]
+    if hw["bluetooth"]:
+        pkgs += ["bluez", "bluez-utils"]
+    if hw["wifi"]:
+        pkgs += ["iw", "wpa_supplicant"]
+    if hw["laptop"]:
+        pkgs += ["tlp", "powertop", "acpid"]
+    return pkgs
+
+def build_package_list(desktop_choice):
+    hw = detect_hardware()
+    pkgs = (
+        BASE_PACKAGES
+        + CORE_UTILS
+        + NETWORK_TOOLS
+        + DEV_PACKAGES
+        + hardware_packages(hw)
+    )
+
+    if desktop_choice == "1":
+        pkgs += KDE_LEAN
+    elif desktop_choice == "2":
+        pkgs += GNOME_LEAN
+
+    return list(dict.fromkeys(pkgs))
+
+# ---------- Disk ----------
 def list_partitions():
-    print(Fore.MAGENTA + "\nExisting partitions:")
-    subprocess.run("lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT -dn", shell=True)
+    run("lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT")
 
 def select_partitions():
-    print(Fore.YELLOW + "\nSelect partitions carefully!")
-    efi = input(Fore.GREEN + "EFI partition to use (do NOT format, e.g., /dev/nvme0n1p1): ")
-    root = input(Fore.GREEN + "Root partition to format (e.g., /dev/nvme0n1p2): ")
-    confirm = input(Fore.RED + f"\nWARNING: Only {root} will be formatted! EFI ({efi}) will NOT be formatted. Continue? (y/N): ")
-    if confirm.lower() != "y":
-        print(Fore.RED + "Aborting installation.")
-        exit(0)
-    return efi, root
+    efi = input(f"{GREEN}EFI partition (e.g. /dev/nvme0n1p1): {RESET}")
+    format_efi = input(f"{YELLOW}Format EFI partition? (y/N): {RESET}").lower() == "y"
+    root = input(f"{GREEN}Root partition to format: {RESET}")
+    if input(f"{RED}Format {root}? (y/N): {RESET}").lower() != "y":
+        sys.exit(1)
+    return efi, format_efi, root
 
-# ---------- Formatting / Encryption ----------
-def format_root(root_partition):
-    print(Fore.BLUE + f"\nEncrypting and formatting root partition: {root_partition}")
-    run(f"cryptsetup luksFormat --type luks2 {root_partition}")
-    run(f"systemd-cryptenroll --tpm2-device=auto {root_partition}")
-    run(f"cryptsetup luksOpen {root_partition} luksroot")
-    run(f"mkfs.btrfs -f /dev/mapper/luksroot")
+def format_root(root):
+    run(f"cryptsetup luksFormat --type luks2 {root}")
+    run(f"systemd-cryptenroll --tpm2-device=auto {root}")
+    run(f"cryptsetup luksOpen {root} luksroot")
+    run("mkfs.btrfs -f /dev/mapper/luksroot")
 
-def mount_partitions(efi_partition):
-    print(Fore.BLUE + "\nMounting partitions...")
+def mount_partitions(efi, format_efi):
     run("mount /dev/mapper/luksroot /mnt")
     run("mkdir -p /mnt/boot/efi")
-    run(f"mount {efi_partition} /mnt/boot/efi")  # do NOT format EFI
+    if format_efi:
+        run(f"mkfs.fat -F32 {efi}")
+    run(f"mount {efi} /mnt/boot/efi")
 
-# ---------- System configuration ----------
-def get_root_uuid():
-    result = subprocess.run(
-        "blkid -s UUID -o value /dev/mapper/luksroot",
-        shell=True,
-        capture_output=True,
-        text=True,
-        check=True
-    )
-    return result.stdout.strip()
-
-def create_crypttab(uuid):
-    print(Fore.BLUE + "\nCreating /etc/crypttab...")
+def create_crypttab(root):
+    os.makedirs("/mnt/etc", exist_ok=True)
+    uuid = sh(f"blkid -s UUID -o value {root}")
     with open("/mnt/etc/crypttab", "w") as f:
-        f.write(f"luks-root UUID={uuid} - luks tpm2-device=auto\n")
-    print(Fore.GREEN + "crypttab created successfully!")
+        f.write(f"luks-root UUID={uuid} none luks,tpm2-device=auto\n")
 
-def install_base_system():
-    print(Fore.BLUE + "\nInstalling base system + KDE + extras...")
-    run("pacstrap /mnt base linux linux-firmware btrfs-progs sudo networkmanager plasma kde-applications neofetch nmap htop git vim")
+# ---------- Install ----------
+def update_keyring():
+    print(f"{BLUE}Updating Arch keyring...{RESET}")
+    run("pacman -Sy --noconfirm archlinux-keyring")
 
-def configure_system(hostname="archbox"):
-    print(Fore.BLUE + "\nConfiguring system...")
-    # Hostname
-    run(f"arch-chroot /mnt /bin/bash -c 'echo {hostname} > /etc/hostname'")
-    # Timezone
-    run("arch-chroot /mnt /bin/bash -c 'ln -sf /usr/share/zoneinfo/Europe/Tirane /etc/localtime'")
-    run("arch-chroot /mnt /bin/bash -c 'hwclock --systohc'")
-    # Locale
-    run("arch-chroot /mnt /bin/bash -c 'echo \"en_US.UTF-8 UTF-8\" > /etc/locale.gen'")
-    run("arch-chroot /mnt /bin/bash -c 'locale-gen'")
-    run("arch-chroot /mnt /bin/bash -c 'echo \"LANG=en_US.UTF-8\" > /etc/locale.conf'")
-    # Enable network
-    run("arch-chroot /mnt /bin/bash -c 'systemctl enable NetworkManager'")
+def install_base_system(desktop_choice):
+    run("pacstrap /mnt " + " ".join(build_package_list(desktop_choice)))
+    write_hardware_manifest()
 
-def install_bootloader(efi_partition="/boot/efi"):
-    print(Fore.BLUE + "\nInstalling GRUB bootloader...")
-    run("arch-chroot /mnt /bin/bash -c 'pacman -S --noconfirm grub efibootmgr'")
-    # Use the existing EFI partition without formatting
-    run(f"arch-chroot /mnt /bin/bash -c 'grub-install --target=x86_64-efi --efi-directory={efi_partition} --bootloader-id=GRUB'")
-    run("arch-chroot /mnt /bin/bash -c 'grub-mkconfig -o /boot/grub/grub.cfg'")
+def configure_system(hostname="mothership", desktop_choice="1"):
+    run(f"arch-chroot /mnt bash -c 'echo {hostname} > /etc/hostname'")
+    run("arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Tirane /etc/localtime")
+    run("arch-chroot /mnt hwclock --systohc")
+    run("arch-chroot /mnt bash -c 'echo en_US.UTF-8 UTF-8 > /etc/locale.gen'")
+    run("arch-chroot /mnt locale-gen")
+    run("arch-chroot /mnt bash -c 'echo LANG=en_US.UTF-8 > /etc/locale.conf'")
 
-# ---------- Main installer ----------
+    hw = detect_hardware()
+    services = ["NetworkManager", "sshd"]
+
+    if desktop_choice == "1":
+        services.append("sddm")
+    elif desktop_choice == "2":
+        services.append("gdm")
+
+    if hw["bluetooth"]:
+        services.append("bluetooth")
+    if hw["laptop"]:
+        services.append("tlp")
+
+    for s in services:
+        run(f"arch-chroot /mnt systemctl enable {s}")
+
+def install_bootloader():
+    run("arch-chroot /mnt pacman -S --noconfirm grub efibootmgr")
+    run("arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB")
+    run("arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg")
+
+# ---------- Step System ----------
+class Step:
+    def __init__(self, name, fn):
+        self.name = name
+        self.fn = fn
+        self.done = False
+
+def render_status(steps):
+    os.system("clear")
+    print(f"{GREEN}=== Shipwright Installer ==={RESET}\n")
+    for s in steps:
+        print(f"[{'x' if s.done else ' '}] {s.name}")
+    print()
+
+def run_steps(efi, format_efi, root, desktop_choice):
+    steps = [
+        Step("Update keyring", update_keyring),
+        Step("Format root partition", lambda: format_root(root)),
+        Step("Mount partitions", lambda: mount_partitions(efi, format_efi)),
+        Step("Install base system", lambda: install_base_system(desktop_choice)),
+        Step("Create crypttab", lambda: create_crypttab(root)),
+        Step("Configure system", lambda: configure_system(desktop_choice=desktop_choice)),
+        Step("Install bootloader", install_bootloader),
+    ]
+
+    for step in steps:
+        render_status(steps)
+        print(f"{BLUE}>>> {step.name}{RESET}\n")
+        step.fn()
+        step.done = True
+
+    render_status(steps)
+    print(f"{GREEN}Installation complete. Reboot when ready.{RESET}")
+
+# ---------- Desktop selection ----------
+def select_desktop():
+    print(f"""
+{GREEN}Select desktop environment:{RESET}
+  1) KDE Plasma (lean, recommended)
+  2) GNOME (lean)
+  3) Minimal / no desktop
+""")
+    choice = input("Choice [1-3]: ").strip()
+    if choice not in ["1","2","3"]:
+        print(f"{RED}Invalid choice, defaulting to Minimal.{RESET}")
+        choice = "3"
+    return choice
+
+# ---------- Main ----------
 def main():
-    print(Fore.GREEN + "\n=== Arch Triple-Boot Safe Installer ===")
+    print(f"{GREEN}=== Shipwright ==={RESET}")
     list_partitions()
-    efi, root = select_partitions()
-    format_root(root)
-    mount_partitions(efi)
-    uuid = get_root_uuid()
-    create_crypttab(uuid)
-    install_base_system()
-    configure_system()
-    install_bootloader(efi)
-    print(Fore.GREEN + "\n✅ Installation complete! Ready to reboot into your new Arch KDE system.")
+    efi, format_efi, root = select_partitions()
+    desktop_choice = select_desktop()
+    run_steps(efi, format_efi, root, desktop_choice)
 
 if __name__ == "__main__":
     main()
