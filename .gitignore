@@ -1,1 +1,3 @@
 install.iso
+target
+Cargo.lock

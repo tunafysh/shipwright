@@ -1,13 +1,16 @@
 #!/bin/bash
 # THAT'S FKING IT I AM REWRITING IN BASH BECAUSE WTH
 
+backtitle="Shipwright Installer. (please ignore any ui inconsistencies, dialog can only let me customize this much plus there were no reliable docs.)"
 trap "tput cnorm; exit" SIGINT SIGTERM
 
 init_dialog() {
 
-    dialogrc_content='use_colors = ON
-screen_color = (WHITE,BLACK, ON)
-border_color = (BLACK,WHITE, ON)
+    dialogrc_content='
+use_colors = ON
+screen_color = (WHITE,BLACK, OFF)
+border_color = (BLACK,WHITE, OFF)
+menubox_color = (WHITE,BLACK, OFF)
 '
 
     dialogrc_path="/tmp/shw_dialog_theme"
@@ -66,16 +69,25 @@ question() {
     return $result
 }
 
-#if [[ $UID != 0 ]]; then
-#    echo -e "\e[1;91mERROR: \e[0mShipwright is unable to run without root priviliges. Please rerun as root."
-#    exit 1
-#fi
+selection() {
+    local text="$1"
+    local title="${2:-Message}"
+    shift 2
+    local options=("$@")
+    tput civis
+    dialog --no-shadow --colors --backtitle "$backtitle" --title "$title" --menu "$text" 15 50 5 "${options[@]}"
+    local result=$?
+    tput cnorm
+    clear
+    return $result
+}
 
-init
-question "Is bash good?"
-if [[ $? == 1 ]]; then
-    echo "why..."
-else
-    echo "yay"
+if [[ $UID != 0 ]]; then
+    echo -e "\e[1;91mERROR: \e[0mShipwright is unable to run without root priviliges. Please rerun as root."
+    exit 1
 fi
 
+selection "Welcome to the Shipwright Installer! Please select an option to get started." "Main Menu" "1" "Start Installation" "2" "Exit"
+echo $?
+
+init
