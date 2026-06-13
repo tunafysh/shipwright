@@ -77,7 +77,7 @@ const CORE_PACKAGES: [&str; 50] = [
 ];
 
 // Replaced the generic "plasma" and bloated "kde-applications" groups
-const KDE_PACKAGES: [&str; 22] = [
+const KDE_PACKAGES: [&str; 25] = [
     // Core Desktop Shell
     "plasma-desktop",
     "sddm",
@@ -107,6 +107,9 @@ const KDE_PACKAGES: [&str; 22] = [
     "xorg-server-xwayland",
     "qt5-wayland",
     "qt6-wayland",
+    "noto-fonts",
+    "noto-fonts-emoji",
+    "ttf-hack"
 ];
 
 const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";
@@ -117,7 +120,7 @@ const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";
 
 const MULTILIB_PACKAGES: [&str; 1] = ["steam"];
 
-const RECOVERY_PACKAGES: [&str; 13] = [
+const RECOVERY_PACKAGES: [&str; 15] = [
     "btrfs-progs",
     "dosfstools",
     "parted",
@@ -131,15 +134,24 @@ const RECOVERY_PACKAGES: [&str; 13] = [
     "curl",
     "tar",
     "gzip",
+    "linux-lts",
+    "bash"
 ];
 
-const ADDITIONAL_PACKAGES: [&str; 6] = [
+const ADDITIONAL_PACKAGES: [&str; 13] = [
     "lutris",
     "prismlauncher",
     "supertuxkart",
     "retroarch",
     "supertux",
     "timeshift",
+    "kitty",
+    "neovim",
+    "starship",
+    "gparted",
+    "gimp",
+    "krita",
+    "vlc"
 ];
 
 const AMD_MICROCODE_PACKAGES: [&str; 1] = ["amd-ucode"];
@@ -634,6 +646,7 @@ fn configure_system(state: &InstallState) -> Result<()> {
     if state.options.installation_type == InstallationType::KdePlasma {
         arch_chroot_pacman_sync_install(&KDE_PACKAGES)?;
         spawn_arch_chroot(&["systemctl", "enable", "sddm"])?;
+        spawn_arch_chroot(&["lookandfeeltool", "-a", "org.kde.breezedark.desktop"])?;
     }
 
     if state.options.has_battery {
@@ -646,6 +659,9 @@ fn configure_system(state: &InstallState) -> Result<()> {
         arch_chroot_pacman_sync_install(&["bluez", "bluez-utils"])?;
         spawn_arch_chroot(&["systemctl", "enable", "bluetooth"])?;
     }
+
+    spawn_arch_chroot(&["systemctl", "enable", "NetworkManager"])?;
+
 
     Ok(())
 }
@@ -849,11 +865,6 @@ fn mount_filesystems(state: &InstallState) -> Result<()> {
         spawn("mount", &[home.path().as_str(), "/mnt/home"], false)?;
     }
 
-    if let Some(recovery) = &state.disk_layout.recovery_partition {
-        fs::create_dir_all("/mnt/recovery")?;
-        spawn("mount", &[recovery.path().as_str(), "/mnt/recovery"], false)?;
-    }
-
     Ok(())
 }
 
@@ -907,6 +918,12 @@ fn install_recovery_system(state: &InstallState) -> Result<()> {
     if state.disk_layout.recovery_partition.is_none() {
         return Ok(());
     }
+
+    if let Some(recovery) = &state.disk_layout.recovery_partition {
+        fs::create_dir_all("/mnt/recovery")?;
+        spawn("mount", &[recovery.path().as_str(), "/mnt/recovery"], false)?;
+    }
+
     let recovery = state.disk_layout.recovery_partition.as_ref().unwrap();
     let image_url = format!(
         "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/{}/alpine-minirootfs-3.23.4-{}.tar.gz",
@@ -957,7 +974,7 @@ fn install_recovery_system(state: &InstallState) -> Result<()> {
 
     // Adding bootloader entry for recovery system
 
-    let recovery_entry = UNFORMATTED_RECOVERY_ENTRY.replace("{{UUID}}", &recovery.uuid);
+    let recovery_entry = UNFORMATTED_RECOVERY_ENTRY.replace("{{ROOT_UUID}}", &recovery.uuid);
     let recovery_entry_path = "/mnt/etc/grub.d/40_custom";
     let mut entry_data = fs::read_to_string(recovery_entry_path).unwrap_or_default();
     if entry_data.contains(&recovery_entry) {

@@ -1,3 +1,4 @@
+# BEGIN SHIPWRIGHT RECOVERY ENTRY
 menuentry "Shipwright Recovery (Alpine)" {
     insmod ext2
 
@@ -6,3 +7,4 @@ menuentry "Shipwright Recovery (Alpine)" {
     linux /boot/vmlinuz-lts root=UUID={{ROOT_UUID}} rw
     initrd /boot/initramfs-lts
 }
+# END SHIPWRIGHT RECOVERY ENTRY

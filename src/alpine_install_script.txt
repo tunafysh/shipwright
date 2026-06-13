@@ -1,4 +1,4 @@
-export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+echo "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin" >> /root/.bashrc
 echo nameserver 1.1.1.1 > /etc/resolv.conf
 /sbin/apk update
 /sbin/apk add --no-cache {{packages}}
