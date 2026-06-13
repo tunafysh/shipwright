@@ -1,0 +1,18 @@
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin
+echo nameserver 1.1.1.1 > /etc/resolv.conf
+/sbin/apk update
+/sbin/apk add --no-cache {{packages}}
+
+/sbin/rc-update add devfs sysinit
+/sbin/rc-update add dmesg sysinit
+/sbin/rc-update add mdev sysinit
+
+/sbin/rc-update add hwdrivers sysinit
+/sbin/rc-update add modules sysinit
+
+/sbin/rc-update add sysctl boot
+/sbin/rc-update add hostname boot
+/sbin/rc-update add bootmisc boot
+/sbin/rc-update add syslog boot
+
+/sbin/rc-update add networkmanager default

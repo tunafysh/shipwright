@@ -1,75 +1,184 @@
-use anyhow::{Error, Result};
-mod util;
-use crate::util::{
-    DiskLayout, add_home_volume, add_nvme_module, confirmation, create_user, detect_cpu_vendor,
-    enroll_tpm, has_battery, luks_format, question, run, select_partition, selection,
+use anyhow::{Context, Result};
+mod logic;
+mod system;
+mod ui;
+
+use crate::logic::{
+    DiskLayout, InstallOptions, InstallStage, InstallState, Partition, PipelineEngine, UserConfig,
+    build_install_plan, hash_password, verify_password,
 };
 use crossterm::style::Stylize;
-use std::{fs, path::Path, process::Command};
-use util::{clear, get_partitions, spawn};
+use log::{error, info};
+use serde::{Deserialize, Serialize};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
-static CORE_PACKAGES: [&str; 40] = [
-    "base",
-    "linux",
-    "linux-firmware",
-    "efibootmgr",
-    "grub",
-    "os-prober",
-    "networkmanager",
-    "base-devel",
-    "git",
-    "sudo",
-    "vim",
-    "nano",
-    "mc",
-    "links",
-    "btrfs-progs",
-    "dosfstools",
-    "cryptsetup",
-    "linux-firmware",
-    "linux-headers",
-    "btop",
-    "htop",
-    "fastfetch",
-    "parted",
-    "gptfdisk",
-    "lvm2",
-    "reflector",
-    "zsh",
-    "zoxide",
-    "bind-tools",
-    "rsync",
-    "speedtest-cli",
-    "sshfs",
-    "nmap",
-    "dsniff",
-    "zip",
-    "unzip",
-    "powertop",
-    "libarchive",
-    "arp-scan",
-    "wavemon"
-];
+const CHECKPOINT_PATH: &str = "/tmp/shipwright-progress.json";
 
-static KDE_PACKAGES: [&str; 10] = [
-    "plasma",
-    "sddm",
-    "konsole",
-    "dolphin",
-    "kde-applications",
-    "wayland-protocols",
-    "wayland",
-    "xorg-server-xwayland",
-    "qt5-wayland",
-    "qt6-wayland",
-];
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedInstallState {
+    cpu_vendor: String,
+    partitions: Vec<Partition>,
+    disk_layout: DiskLayout,
+    #[serde(default)]
+    root_encryption_password_hash: Option<String>,
+    username: String,
+    #[serde(default)]
+    user_password_hash: Option<String>,
+    root_password_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_encryption_password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_password: Option<String>,
+    options: InstallOptions,
+}
 
-static AMD_MICROCODE_PACKAGES: [&str; 1] = ["amd-ucode"];
-static INTEL_MICROCODE_PACKAGES: [&str; 1] = ["intel-ucode"];
+#[derive(Debug, Serialize, Deserialize)]
+struct InstallCheckpoint {
+    completed_stages: Vec<InstallStage>,
+    state: PersistedInstallState,
+}
+
+impl PersistedInstallState {
+    fn from_install_state(state: &InstallState) -> Result<Self> {
+        Ok(Self {
+            cpu_vendor: state.cpu_vendor.clone(),
+            partitions: state.partitions.clone(),
+            disk_layout: state.disk_layout.clone(),
+            root_encryption_password_hash: Some(hash_password(
+                state.root_encryption_password.as_str(),
+            )?),
+            root_password_hash: hash_password(state.root_password.as_str())?,
+            username: state.user.username.clone(),
+            user_password_hash: state
+                .user
+                .password
+                .as_ref()
+                .map(|p| hash_password(p.as_str()))
+                .transpose()?,
+            root_encryption_password: None,
+            user_password: None,
+            options: state.options.clone(),
+        })
+    }
+
+    fn into_install_state(self) -> Result<InstallState> {
+        let root_encryption_password = ui::prompt_text(
+            "Checkpoint restored. Re-enter encrypted root partition password:",
+            true,
+        )?;
+
+        let user_password = if self.user_password_hash.is_some() {
+            Some(ui::prompt_text("Re-enter user password:", true)?)
+        } else {
+            None
+        };
+
+        let root_password = ui::prompt_text("Re-enter root password:", true)?;
+
+        // (password, hash)
+        let mut checks: Vec<(Option<String>, Option<&String>)> = vec![
+            (
+                Some(root_password.to_string()),
+                Some(&self.root_password_hash),
+            ),
+            (
+                Some(root_encryption_password.to_string()),
+                self.root_encryption_password_hash.as_ref(),
+            ),
+        ];
+
+        if let Some(user_pw) = &user_password {
+            checks.push((Some(user_pw.to_string()), self.user_password_hash.as_ref()));
+        }
+
+        for (password_opt, hash_opt) in checks {
+            let (Some(password), Some(hash)) = (password_opt, hash_opt) else {
+                continue;
+            };
+
+            if !verify_password(&password, hash)? {
+                return Err(anyhow::anyhow!(
+                    "Password provided does not match the stored hash. Please ensure you enter the correct password."
+                ));
+            }
+        }
+
+        Ok(InstallState {
+            cpu_vendor: self.cpu_vendor,
+            partitions: self.partitions,
+            disk_layout: self.disk_layout,
+            root_encryption_password,
+            root_password,
+            user: UserConfig {
+                username: self.username,
+                password: user_password,
+            },
+            options: self.options,
+        })
+    }
+}
+
+fn load_checkpoint(path: &str) -> Result<Option<InstallCheckpoint>> {
+    if !Path::new(path).exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read checkpoint file at {}", path))?;
+    let checkpoint: InstallCheckpoint = serde_json::from_str(content.as_str())
+        .with_context(|| format!("Failed to parse checkpoint JSON at {}", path))?;
+    Ok(Some(checkpoint))
+}
+
+fn save_checkpoint(
+    path: &str,
+    state: &InstallState,
+    completed_stages: &[InstallStage],
+) -> Result<()> {
+    let checkpoint = InstallCheckpoint {
+        completed_stages: completed_stages.to_vec(),
+        state: PersistedInstallState::from_install_state(state)?,
+    };
+
+    let json = serde_json::to_string_pretty(&checkpoint)?;
+    fs::write(path, json)
+        .with_context(|| format!("Failed to write checkpoint file at {}", path))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to set permissions for checkpoint file at {}", path))?;
+    Ok(())
+}
+
+fn clear_checkpoint(path: &str) -> Result<()> {
+    if Path::new(path).exists() {
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to remove checkpoint file at {}", path))?;
+    }
+    Ok(())
+}
+
+fn init_logging() -> Result<()> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Info)
+        .chain(std::io::stdout())
+        .chain(fern::log_file("shipwright.log")?)
+        .apply()?;
+
+    Ok(())
+}
 
 fn main() -> Result<()> {
-    // Startup
-    if std::env::var("USER").unwrap_or_default() != "root" {
+    init_logging()?;
+
+    if !system::is_root_user() {
+        error!("Installer started without root privileges");
         println!(
             "{}",
             "This installer must be run as root. Please run with sudo or as the root user."
@@ -79,358 +188,131 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let is_efi = std::path::Path::new("/sys/firmware/efi").exists();
-    let has_bluetooth = std::path::Path::new("/sys/class/bluetooth").exists();
-
-    clear()?;
+    ui::clear_screen()?;
     println!("{}", "=== Shipwright Installer ===".green().bold());
-    let cpu_vendor = detect_cpu_vendor().unwrap_or_else(|| "Unknown".to_string());
+    let mut completed_stages: Vec<InstallStage> = Vec::new();
 
-    println!("{}", "Setting up keyring and installing essential packages...".bold());
-    spawn(
-        "pacman-key",
-        [
-            "--init",
-        ]
-        .to_vec(),
+    let mut state = if let Some(checkpoint) = load_checkpoint(CHECKPOINT_PATH)? {
+        info!(
+            "Checkpoint found at {}. Resuming installation with {} completed stages",
+            CHECKPOINT_PATH,
+            checkpoint.completed_stages.len()
+        );
+        println!(
+            "{}",
+            format!(
+                "Resuming installation from checkpoint ({} completed stages).",
+                checkpoint.completed_stages.len()
+            )
+            .yellow()
+            .bold()
+        );
+        completed_stages = checkpoint.completed_stages;
+        checkpoint.state.into_install_state()?
+    } else {
+        build_fresh_install_state()?
+    };
+
+    info!("Building install plan");
+    let plan = build_install_plan(&state)?;
+    let stages_to_run: Vec<InstallStage> = plan
+        .stages
+        .iter()
+        .copied()
+        .filter(|stage| !completed_stages.contains(stage))
+        .collect();
+
+    if stages_to_run.is_empty() {
+        info!("All stages already completed according to checkpoint; clearing checkpoint");
+        clear_checkpoint(CHECKPOINT_PATH)?;
+        println!(
+            "{}",
+            "Install already complete according to checkpoint."
+                .green()
+                .bold()
+        );
+        return Ok(());
+    }
+
+    info!(
+        "Executing install pipeline ({} remaining of {} total stages)",
+        stages_to_run.len(),
+        plan.stages.len()
+    );
+
+    PipelineEngine::new(|stage, state: &mut InstallState| {
+        system::execute_stage(stage, state)?;
+
+        if !completed_stages.contains(&stage) {
+            completed_stages.push(stage);
+        }
+
+        save_checkpoint(CHECKPOINT_PATH, state, completed_stages.as_slice())?;
+        Ok(())
+    })
+    .run(
+        &mut state,
+        &crate::logic::InstallPlan {
+            stages: stages_to_run,
+        },
     )?;
-    spawn(
-        "pacman-key",
-        [
-            "--populate",
-            "archlinux",
-        ]
-        .to_vec(),
-    )?;
-    run(
-        "pacman",
-        [
-            "-Sy",
-            "--noconfirm",
-            "archlinux-keyring",
-            "reflector",
-            "btrfs-progs",
-            "dosfstools",
-        ]
-        .to_vec()
-    )?;
 
-    let installation_type = selection(
-        "Select the type of installation",
-        vec!["Minimal (no desktop environment)", "KDE Plasma"],
-    )?;
+    clear_checkpoint(CHECKPOINT_PATH)?;
+    info!("Install pipeline completed successfully");
 
-    // Time synchronization
+    Ok(())
+}
 
-    println!("Syncing time...");
-    spawn("timedatectl", vec!["set-ntp", "true"])?;
+fn build_fresh_install_state() -> Result<InstallState> {
+    let is_efi = system::is_efi();
+    let has_bluetooth = system::has_bluetooth();
+    let has_battery = system::has_battery();
+    let has_tpm = system::has_tpm();
+    info!(
+        "Hardware flags detected: is_efi={}, bluetooth={}, battery={}, tpm={}",
+        is_efi, has_bluetooth, has_battery, has_tpm
+    );
 
-    // Partitioning (user intervention required).
+    let cpu_vendor = system::detect_cpu_vendor().unwrap_or_else(|| "Unknown".to_string());
+    let installation_type = ui::prompt_installation_type()?;
 
     println!("Fetching partitions...");
-    let partitions = get_partitions()?;
+    let partitions = system::get_partitions()?;
+    info!("Discovered {} partition entries", partitions.len());
     if partitions.is_empty() {
+        error!("No partitions found; aborting installation");
         println!(
             "{}",
             "No partitions found. Please ensure you have at least one disk connected."
                 .red()
                 .bold()
         );
-        return Ok(());
+        return Err(anyhow::anyhow!("No partitions found"));
     }
 
-    let mut layout = DiskLayout {
-        efi_partition: None,
-        root_partition: "".to_string(),
-        home_partition: None,
-        swap_partition: None,
-    };
-
-    if is_efi {
-        let selected = select_partition(
-            "Which one of the partitions should be the EFI partition?",
-            &partitions,
-        )?;
-        layout.efi_partition = Some(selected);
-    }
-
-    let selected = select_partition(
-        "Which one of the partitions should be the root partition?",
-        &partitions,
-    )?;
-    layout.root_partition = selected;
-
-    let should_swap = confirmation("Do you want to create a swap partition?")?;
-    if should_swap {
-        let selected = select_partition(
-            "Which one of the partitions should be the swap partition?",
-            &partitions,
-        )?;
-        layout.swap_partition = Some(selected);
-    }
-
-    let should_home = confirmation("Do you want to create a separate home partition?")?;
-    if should_home {
-        let selected = select_partition(
-            "Which one of the partitions should be the home partition?",
-            &partitions,
-        )?;
-        layout.home_partition = Some(selected)
-    }
-
-    println!("Selected partitions:");
-    println!("Root: /dev/{}", layout.root_partition);
-    if let Some(efi) = &layout.efi_partition {
-        println!("EFI: /dev/{}", efi);
-    }
-    if let Some(home) = &layout.home_partition {
-        println!("Home: /dev/{}", home);
-    }
-    if let Some(swap) = &layout.swap_partition {
-        println!("Swap: /dev/{}", swap);
-    }
-
-    let password = question(
+    let root_encryption_password = ui::prompt_text(
         "Please type the password for the encrypted root partition",
         true,
     )?;
+    let should_format_efi = ui::prompt_confirmation("Should the EFI partition be formatted?")?;
+    let root_password = ui::prompt_text("Enter the password for the root user:", true)?;
+    let user = ui::prompt_user_config()?;
 
-    // Formatting and LUKS encryption setup.
-
-    spawn("umount", ["-R", "/mnt"].to_vec()).ok();
-    let should_format_efi = confirmation("Should the EFI partition be formatted?")?;
-    if is_efi
-        && should_format_efi
-        && let Some(efi_partition) = &layout.efi_partition
-    {
-        println!("{}", "Formatting EFI".bold());
-        let result = spawn(
-            "mkfs.fat",
-            ["-F32", "-I", format!("/dev/{}", efi_partition).as_str()].to_vec(),
-        )?;
-        if result != 0 {
-            Err(Error::msg(format!("Failed to format EFI partition. Command: mkfs.fat -F32 /dev/{}", efi_partition)))?;
-        }
-    }
-
-    println!("{}", "Formatting root".bold());
-    luks_format(&layout.root_partition, password)?;
-    spawn("mkfs.btrfs", ["/dev/mapper/encrypted_root"].to_vec())?;
-    spawn("mount", ["/dev/mapper/encrypted_root", "/mnt"].to_vec())?;
-    fs::create_dir_all("/mnt/boot")?;
-    if is_efi && let Some(efi_partition) = &layout.efi_partition {
-        fs::create_dir_all("/mnt/boot/efi")?;
-        spawn(
-            "mount",
-            [format!("/dev/{}", efi_partition).as_str(), "/mnt/boot/efi"].to_vec(),
-        )?;
-    }
-    if let Some(home_partition) = &layout.home_partition {
-        spawn(
-            "mkfs.btrfs",
-            [format!("/dev/{}", home_partition).as_str()].to_vec(),
-        )?;
-        spawn("mount", [format!("/dev/{}", home_partition).as_str(), "/mnt/home"].to_vec())?;
-    }
-
-    if let Some(swap_partition) = &layout.swap_partition {
-        spawn(
-        "mkswap",
-        [format!("/dev/{}", swap_partition).as_str()].to_vec(),
-        )?;
-        spawn(
-        "swapon",
-        [format!("/dev/{}", swap_partition).as_str()].to_vec(),
-        )?;
-    }
-
-    // Base system installation.
-
-    let mut pkgs: Vec<&str> = CORE_PACKAGES.to_vec();
-    if cpu_vendor.contains("AMD") {
-        pkgs.extend(AMD_MICROCODE_PACKAGES.iter().copied());
-    } else if cpu_vendor.contains("Intel") {
-        pkgs.extend(INTEL_MICROCODE_PACKAGES.iter().copied());
-    }
-
-    let mut args = vec!["/mnt"];
-    args.extend(pkgs);
-    spawn("pacstrap", args)?;
-
-    // Fstab generation and configuration.
-
-    run("genfstab", ["-U", "/mnt", ">>", "/mnt/etc/fstab"].to_vec())?;
-    if let Some(home_partition) = &layout.home_partition {
-        add_home_volume(
-            "/mnt/etc/fstab",
-            home_partition,
-        )?;
-    }
-
-    if layout.root_partition.contains("nvme") {
-        add_nvme_module("/mnt/etc/mkinitcpio.conf")?;
-    }
-
-    if Path::new("/dev/tpm0").exists() {
-        spawn(
-            "pacman",
-            [
-                "-Sy",
-                "--noconfirm",
-                "tpm2-tools"
-            ].to_vec(),
-        )?;
-        enroll_tpm("/dev/mapper/encrypted_root")?;
-    }
-    
-
-    // User creation.
-    create_user()?;
-    run(
-        "sed",
-        [
-            "-i",
-            "s/^# %wheel ALL=(ALL) NOPASSWD: ALL/%wheel ALL=(ALL) NOPASSWD: ALL/",
-            "/mnt/etc/sudoers",
-        ]
-        .to_vec(),
-    )?;
-
-    spawn(
-        "sed",
-        ["-i", "s/#Color/Color\nILoveCandy/", "/mnt/etc/pacman.conf"].to_vec(),
-    )?;
-    fs::remove_file("/mnt/etc/locale.conf")?;
-    fs::write("/mnt/etc/locale.conf", "LANG=en_US.UTF-8")?;
-    fs::write("/mnt/etc/vconsole.conf", "KEYMAP=us\nFONT=ter-v16n")?;
-    fs::write("/mnt/etc/hostname", "Mothership")?;
-    spawn("mkinitcpio", ["-P"].to_vec())?;
-    Command::new("arch-chroot")
-        .args(["/mnt", "passwd"])
-        .status()?;
-
-    // Installing yay and desktop environment.
-
-    spawn(
-        "arch-chroot",
-        vec![
-            "/mnt",
-            "bash",
-            "-c",
-            "git clone https://aur.archlinux.org/yay.git /tmp/yay && cd /tmp/yay && makepkg -si --noconfirm && rm -rf /tmp/yay",
-        ],
-    )?;
-
-    if installation_type == "KDE Plasma" {
-        spawn(
-            "arch-chroot",
-            [
-                "/mnt",
-                "pacman",
-                "-Sy",
-                "--noconfirm",
-                KDE_PACKAGES.join(" ").as_str(),
-            ]
-            .to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            ["/mnt", "systemctl", "enable", "sddm"].to_vec(),
-        )?;
-    }
-
-    if has_battery() {
-        spawn(
-            "arch-chroot",
-            ["/mnt", "systemctl", "enable", "tlp"].to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            [
-                "/mnt",
-                "pacman",
-                "-Sy",
-                "--noconfirm",
-                "power-profiles-daemon",
-            ]
-            .to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            ["/mnt", "systemctl", "enable", "power-profiles-daemon"].to_vec(),
-        )?;
-    }
-
-    if has_bluetooth {
-        spawn(
-            "arch-chroot",
-            [
-                "/mnt",
-                "pacman",
-                "-Sy",
-                "--noconfirm",
-                "bluez",
-                "bluez-utils",
-            ]
-            .to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            ["/mnt", "systemctl", "enable", "bluetooth"].to_vec(),
-        )?;
-    }
-
-    spawn(
-        "sed",
-        [
-            "-i",
-            "s/#DISABLE_OS_PROBER=false/DISABLE_OS_PROBER=false/",
-            "/mnt/etc/default/grub",
-        ]
-        .to_vec(),
-    )?;
-    spawn(
-        "sed",
-        [
-            "-i",
-            "s/GRUB_ENABLE_CRYPTODISK=y/GRUB_ENABLE_CRYPTODISK=y/",
-            "/mnt/etc/default/grub",
-        ]
-        .to_vec(),
-    )?;
-
-    if is_efi {
-        spawn(
-            "arch-chroot",
-            [
-                "/mnt",
-                "grub-install",
-                "--target=x86_64-efi",
-                "--efi-directory=/boot/efi",
-                "--bootloader-id=GRUB",
-            ]
-            .to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            ["/mnt", "grub-mkconfig", "-o", "/boot/grub/grub.cfg"].to_vec(),
-        )?;
-    } else {
-        spawn(
-            "arch-chroot",
-            [
-                "/mnt",
-                "grub-install",
-                "--target=i386-pc",
-                format!("/dev/{}", layout.root_partition).as_str(),
-            ]
-            .to_vec(),
-        )?;
-        spawn(
-            "arch-chroot",
-            ["/mnt", "grub-mkconfig", "-o", "/boot/grub/grub.cfg"].to_vec(),
-        )?;
-    }
-
-    Ok(())
+    let disk_layout = ui::prompt_disk_layout(&partitions, is_efi)?;
+    Ok(InstallState {
+        cpu_vendor,
+        partitions: partitions.clone(),
+        disk_layout,
+        root_encryption_password,
+        root_password,
+        user,
+        options: InstallOptions {
+            installation_type,
+            should_format_efi,
+            is_efi,
+            has_battery,
+            has_bluetooth,
+            has_tpm,
+        },
+    })
 }

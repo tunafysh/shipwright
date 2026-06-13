@@ -1,0 +1,8 @@
+menuentry "Shipwright Recovery (Alpine)" {
+    insmod ext2
+
+    search --no-floppy --fs-uuid --set=root {{ROOT_UUID}}
+
+    linux /boot/vmlinuz-lts root=UUID={{ROOT_UUID}} rw
+    initrd /boot/initramfs-lts
+}
