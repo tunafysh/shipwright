@@ -7,7 +7,10 @@ use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use std::io::stdout;
 use zeroize::Zeroizing;
 
-use crate::logic::{DiskLayout, InstallationType, Partition, UserConfig};
+use crate::logic::{
+    disk::{Disk, DiskLayout, Partition},
+    pipeline::{InstallationType, UserConfig},
+};
 
 pub fn clear_screen() -> Result<()> {
     let mut out = stdout();
@@ -65,6 +68,56 @@ fn prompt_partition(prompt: &str, partitions: &[Partition]) -> Result<Partition>
     Ok(partitions[idx].clone())
 }
 
+pub fn prompt_disk(disks: &[Disk]) -> Result<Disk> {
+    let items: Vec<String> = disks
+        .iter()
+        .map(|d| format!("{} - {}", d.device.path(), d.size))
+        .collect();
+
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select target disk for partitioning")
+        .items(&items)
+        .interact()?;
+
+    Ok(disks[idx].clone())
+}
+
+/// Print a compact summary of available partitions to help users identify choices.
+pub fn print_partitions(partitions: &[Partition]) {
+    println!("Available partitions:");
+    // compute column widths
+    let mut max_path = "PATH".len();
+    let mut max_size = "SIZE".len();
+    let mut max_uuid = "UUID".len();
+    for p in partitions {
+        max_path = max_path.max(p.path().len());
+        max_size = max_size.max(p.size.len());
+        max_uuid = max_uuid.max(p.uuid.len());
+    }
+
+    println!(
+        "{:<width_path$}  {:>width_size$}  {:<width_uuid$}",
+        "PATH",
+        "SIZE",
+        "UUID",
+        width_path = max_path,
+        width_size = max_size,
+        width_uuid = max_uuid
+    );
+
+    for p in partitions {
+        println!(
+            "{:<width_path$}  {:>width_size$}  {:<width_uuid$}",
+            p.path(),
+            p.size,
+            p.uuid,
+            width_path = max_path,
+            width_size = max_size,
+            width_uuid = max_uuid
+        );
+    }
+}
+
 pub fn prompt_disk_layout(partitions: &[Partition], is_efi: bool) -> Result<DiskLayout> {
     let efi_partition = if is_efi {
         Some(prompt_partition(
@@ -117,6 +170,8 @@ pub fn prompt_disk_layout(partitions: &[Partition], is_efi: bool) -> Result<Disk
         recovery_partition,
     })
 }
+
+
 
 #[allow(dead_code)]
 pub fn print_selected_layout(layout: &DiskLayout) {

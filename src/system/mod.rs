@@ -1,4 +1,4 @@
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Error, Result};
 use libcryptsetup_rs::{
     CryptInit, CryptParamsLuks2Ref, Either,
     consts::{flags::CryptActivate, vals::EncryptionFormat},
@@ -14,152 +14,20 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-use crate::logic::{
-    InstallStage, InstallState, InstallationType, Partition, UserConfig, download,
-    is_cachyos,
-};
+mod consts;
+use consts::*;
 
-const STANDARD_LINUX: &str = "linux";
+mod util;
+use util::{ensure_line_value, run, run_arch_chroot, spawn, spawn_arch_chroot, arch_chroot_pacman_sync_install};
+// Re-export interactive spawn helper implemented in util.rs so callers can use
+// `system::spawn_interactive(...)` while the implementation lives in util.
+pub use util::spawn_interactive;
 
-const CACHYOS_LINUX: &str = "linux-cachyos";
-
-const CORE_PACKAGES: [&str; 50] = [
-    "base",
-    "linux-firmware",
-    "efibootmgr",
-    "grub",
-    "os-prober",
-    "networkmanager",
-    "base-devel",
-    "git",
-    "sudo",
-    "vim",
-    "nano",
-    "mc",
-    "links",
-    "btrfs-progs",
-    "dosfstools",
-    "cryptsetup",
-    "linux-firmware",
-    "linux-headers",
-    "btop",
-    "htop",
-    "fastfetch",
-    "parted",
-    "gptfdisk",
-    "lvm2",
-    "reflector",
-    "zsh",
-    "zoxide",
-    "bind-tools",
-    "rsync",
-    "speedtest-cli",
-    "sshfs",
-    "nmap",
-    "dsniff",
-    "zip",
-    "unzip",
-    "powertop",
-    "libarchive",
-    "arp-scan",
-    "wavemon",
-    "kbd",
-    "dracut",
-    "iwd",
-    "smartmontools",
-    "p7zip",
-    "unrar",
-    "xdg-user-dirs",
-    "pipewire-audio",
-    "pipewire-alsa",
-    "pipewire-pulse",
-    "wireplumber",
-];
-
-// Replaced the generic "plasma" and bloated "kde-applications" groups
-const KDE_PACKAGES: [&str; 25] = [
-    // Core Desktop Shell
-    "plasma-desktop",
-    "sddm",
-    "kwallet-pam",          // Keeps your wallet unlocked completely silently
-    
-    // Core Base Apps (Essential Utilities)
-    "konsole",
-    "dolphin",
-    "ark",          
-    "spectacle",    
-    "plasma-systemmonitor", // Clean GUI resource/task manager
-
-    // Hardware & Tray Integration (The "Middle Ground")
-    "systemsettings", 
-    "kinfocenter",          // Adds "About this System" profile pane
-    "plasma-nm",      
-    "powerdevil",     
-    "plasma-pa",      
-    "bluedevil",      
-    "kde-cli-tools",  
-    "kde-gtk-config",       // Essential to sync system theme to GTK apps
-    "xdg-desktop-portal-kde", // Vital wayland file chooser / screenshare integration
-
-    // Display Server Protocols
-    "wayland-protocols",
-    "wayland",
-    "xorg-server-xwayland",
-    "qt5-wayland",
-    "qt6-wayland",
-    "noto-fonts",
-    "noto-fonts-emoji",
-    "ttf-hack"
-];
-
-const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";
-
-// i can't install flatpak packages in the chroot for some reason, so i'm skipping it for now. will add it back later when i have more time to debug the issue
-
-// const FLATPAK_PACKAGES: [&str; 2] = ["org.vinegarhq.Sober", "org.prismlauncher.PrismLauncher"];
-
-const MULTILIB_PACKAGES: [&str; 1] = ["steam"];
-
-const RECOVERY_PACKAGES: [&str; 15] = [
-    "btrfs-progs",
-    "dosfstools",
-    "parted",
-    "efibootmgr",
-    "util-linux",
-    "e2fsprogs",
-    "openrc",
-    "openssh",
-    "networkmanager",
-    "networkmanager-openrc",
-    "curl",
-    "tar",
-    "gzip",
-    "linux-lts",
-    "bash"
-];
-
-const ADDITIONAL_PACKAGES: [&str; 13] = [
-    "lutris",
-    "prismlauncher",
-    "supertuxkart",
-    "retroarch",
-    "supertux",
-    "timeshift",
-    "kitty",
-    "neovim",
-    "starship",
-    "gparted",
-    "gimp",
-    "krita",
-    "vlc"
-];
-
-const AMD_MICROCODE_PACKAGES: [&str; 1] = ["amd-ucode"];
-const INTEL_MICROCODE_PACKAGES: [&str; 1] = ["intel-ucode"];
-
-const UNFORMATTED_RECOVERY_ENTRY: &str = include_str!("../recovery_entry.txt");
-
-const BOOTLOADER_THEME: &str = "grub-theme-minegrub-world-selection-git";
+use crate::{logic::{
+    disk::{Partition, Disk},
+    download,
+    pipeline::{InstallStage, InstallState, InstallationType, UserConfig},
+}};
 
 #[derive(Debug, Deserialize)]
 struct Lsblk {
@@ -188,6 +56,13 @@ pub fn has_bluetooth() -> bool {
     Path::new("/sys/class/bluetooth").exists()
 }
 
+pub fn is_cachyos() -> bool {
+    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        return content.contains("CachyOS");
+    }
+    false
+}
+
 pub fn has_battery() -> bool {
     if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
         for entry in entries.flatten() {
@@ -202,75 +77,6 @@ pub fn has_battery() -> bool {
 
 pub fn has_tpm() -> bool {
     Path::new("/dev/tpm0").exists()
-}
-
-pub fn spawn(cmd: &str, args: &[&str], pipe_stdin: bool) -> Result<i32> {
-    let mut command = Command::new(cmd);
-    command.args(args);
-    if pipe_stdin {
-        command.stdin(Stdio::piped());
-    }
-    let result = command.status()?;
-    if let Some(code) = result.code()
-        && result.success()
-    {
-        Ok(code)
-    } else if !args.is_empty() {
-        Err(Error::msg(format!(
-            "Command execution failed. Command: {} with args: {:?}. Exit code: {}",
-            cmd,
-            args,
-            result.code().unwrap_or(-1)
-        )))
-    } else {
-        Err(Error::msg(format!(
-            "Command execution failed. Command: {} with no args. Exit code: {}",
-            cmd,
-            result.code().unwrap_or(-1)
-        )))
-    }
-}
-
-pub fn run(cmd: &str, args: &[&str]) -> Result<String> {
-    let result = Command::new(cmd)
-        .stdin(Stdio::piped())
-        .args(args)
-        .output()?;
-
-    if result.status.success() && result.status.code().unwrap_or(-1) == 0 {
-        Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
-    } else if !args.is_empty() {
-        Err(Error::msg(format!(
-            "Command execution failed. Command: {} with args: {:?}. Exit code: {}",
-            cmd,
-            args,
-            result.status.code().unwrap_or(-1)
-        )))
-    } else {
-        Err(Error::msg(format!(
-            "Command execution failed. Command: {} with no args. Exit code: {}",
-            cmd,
-            result.status.code().unwrap_or(-1)
-        )))
-    }
-}
-
-pub fn run_arch_chroot(args: &[&str]) -> Result<String> {
-    let mut chroot_args = vec!["/mnt"];
-    chroot_args.extend_from_slice(args);
-    run("arch-chroot", &chroot_args)
-}
-
-pub fn spawn_arch_chroot(args: &[&str]) -> Result<i32> {
-    let mut chroot_args = vec!["/mnt"];
-    chroot_args.extend_from_slice(args);
-    spawn("arch-chroot", &chroot_args, false)
-}
-
-fn arch_chroot_pacman_sync_install(packages: &[&str]) -> Result<i32> {
-    let mut args = vec!["pacman", "-Sy", "--noconfirm"];
-    args.extend_from_slice(packages);
-    spawn_arch_chroot(&args)
 }
 
 pub fn detect_cpu_vendor() -> Option<String> {
@@ -312,6 +118,31 @@ pub fn get_partitions() -> Result<Vec<Partition>> {
     Ok(partitions)
 }
 
+pub fn get_disks() -> Result<Vec<Disk>> {
+    let output = run("lsblk", &["-J", "-o", "NAME,SIZE,TYPE,MODEL,UUID"])?;
+    let parsed: Lsblk = serde_json::from_str(&output)?;
+
+    fn collect(devices: Vec<LsblkDevice>, disks: &mut Vec<Disk>) {
+        for dev in devices {
+            if dev.device_type == "disk" {
+                disks.push(Disk {
+                    device: crate::logic::disk::Device::from_name(dev.name.clone()),
+                    size: dev.size.clone(),
+                });
+            }
+            if let Some(children) = dev.children {
+                collect(children, disks);
+            }
+        }
+    }
+
+    let mut disks: Vec<Disk> = Vec::new();
+    collect(parsed.blockdevices, &mut disks);
+    Ok(disks)
+}
+
+// spawn_interactive is implemented in util.rs and re-exported above.
+
 pub fn prepare_keyring_and_base_tools() -> Result<()> {
     spawn("pacman-key", &["--init"], false)?;
     spawn("pacman-key", &["--populate", "archlinux"], false)?;
@@ -324,6 +155,7 @@ pub fn prepare_keyring_and_base_tools() -> Result<()> {
             "reflector",
             "btrfs-progs",
             "dosfstools",
+
         ],
     )?;
     Ok(())
@@ -426,54 +258,6 @@ hostonly="yes"
     );
 
     write(dracut_conf_path, config)?;
-    Ok(())
-}
-
-fn ensure_line_value(path: &str, old_line: &str, new_line: &str) -> Result<()> {
-    if !Path::new(path).exists() {
-        if path.starts_with("/mnt/") {
-            return Err(anyhow!(
-                "Config file not found at {}. Refusing to fall back to host path for installer safety.",
-                path
-            ));
-        }
-
-        return Err(anyhow!("Config file not found at {}", path));
-    }
-
-    let content = read_to_string(path)?;
-    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-    let old_line_trimmed = old_line.trim();
-    let new_line_trimmed = new_line.trim();
-
-    if lines.iter().any(|line| line.trim() == new_line_trimmed) {
-        return Ok(());
-    }
-
-    let mut replaced = false;
-    for line in &mut lines {
-        let trimmed = line.trim();
-        let commented_new = format!("#{}", new_line_trimmed);
-        let commented_new_with_space = format!("# {}", new_line_trimmed);
-
-        if trimmed == old_line_trimmed
-            || trimmed == commented_new
-            || trimmed == commented_new_with_space
-        {
-            *line = new_line.to_string();
-            replaced = true;
-            break;
-        }
-    }
-
-    if !replaced {
-        lines.push(new_line.to_string());
-    }
-
-    let mut updated = lines.join("\n");
-    updated.push('\n');
-
-    write(path, updated)?;
     Ok(())
 }
 
@@ -662,7 +446,6 @@ fn configure_system(state: &InstallState) -> Result<()> {
 
     spawn_arch_chroot(&["systemctl", "enable", "NetworkManager"])?;
 
-
     Ok(())
 }
 
@@ -739,7 +522,7 @@ fn delete_user(username: &str) -> Result<()> {
     Ok(())
 }
 
-fn partition_disks(state: &InstallState) -> Result<()> {
+fn format_partitions(state: &mut InstallState) -> Result<()> {
     let _ = spawn("umount", &["-R", "/mnt"], false);
 
     if state.options.is_efi
@@ -755,10 +538,6 @@ fn partition_disks(state: &InstallState) -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-fn format_partitions(state: &mut InstallState) -> Result<()> {
     luks_format(
         &mut state.disk_layout.root_partition,
         state.root_encryption_password.as_str(),
@@ -1012,7 +791,6 @@ pub fn execute_stage(stage: InstallStage, state: &mut InstallState) -> Result<()
             prepare_keyring_and_base_tools()?;
             sync_time()?;
         }
-        InstallStage::PartitionDisks => partition_disks(state)?,
         InstallStage::FormatPartitions => format_partitions(state)?,
         InstallStage::MountFilesystem => mount_filesystems(state)?,
         InstallStage::InstallBaseSystem => install_base_packages(state)?,

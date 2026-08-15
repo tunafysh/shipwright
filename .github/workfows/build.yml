@@ -1,0 +1,23 @@
+name: Build
+
+on: 
+  push:
+    branches: [main]
+  pull_request: 
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ${{matrix.os}}
+    matrix:
+      include:
+        - os: "ubuntu-latest-arm"
+        - os: "ubuntu-latest"
+
+      strategy:
+        fail-fast: false
+
+  steps:
+    - uses: actions/checkout@v7
+
+    
