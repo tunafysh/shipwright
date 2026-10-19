@@ -1,3 +1,4 @@
 install.iso
 target
 Cargo.lock
+arch*

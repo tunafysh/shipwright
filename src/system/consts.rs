@@ -56,7 +56,7 @@ pub const CORE_PACKAGES: [&str; 50] = [
 ];
 
 // Replaced the generic "plasma" and bloated "kde-applications" groups
-pub const KDE_PACKAGES: [&str; 25] = [
+pub const KDE_PACKAGES: [&str; 26] = [
     // Core Desktop Shell
     "plasma-desktop",
     "sddm",
@@ -86,6 +86,7 @@ pub const KDE_PACKAGES: [&str; 25] = [
     "noto-fonts",
     "noto-fonts-emoji",
     "ttf-hack",
+    "weston"
 ];
 
 pub const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";
@@ -136,5 +137,3 @@ pub const INTEL_MICROCODE_PACKAGES: [&str; 1] = ["intel-ucode"];
 pub const UNFORMATTED_RECOVERY_ENTRY: &str = include_str!("../recovery_entry.txt");
 
 pub const BOOTLOADER_THEME: &str = "grub-theme-minegrub-world-selection-git";
-
-

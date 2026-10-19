@@ -1,6 +1,6 @@
-use anyhow::Result;
-use crate::system;
 use crate::logic::pipeline::{InstallStage, InstallState};
+use crate::system;
+use anyhow::Result;
 /// Default path for saving pipeline checkpoints.
 pub const CHECKPOINT_PATH: &str = "/tmp/shipwright-progress.json";
 
@@ -8,12 +8,12 @@ pub const CHECKPOINT_PATH: &str = "/tmp/shipwright-progress.json";
 pub fn checkpoint_path() -> String {
     std::env::var("SHIPWRIGHT_CHECKPOINT_PATH").unwrap_or_else(|_| CHECKPOINT_PATH.to_string())
 }
-use serde::{Deserialize, Serialize};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
-use crate::logic::security::{hash_password, verify_password};
-use crate::ui;
 use crate::logic::disk::{DiskLayout, Partition};
 use crate::logic::pipeline::UserConfig;
+use crate::logic::security::{hash_password, verify_password};
+use crate::ui;
+use serde::{Deserialize, Serialize};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PersistedInstallState {
@@ -129,7 +129,11 @@ pub fn load_checkpoint(path: &str) -> Result<Option<InstallCheckpoint>> {
     Ok(Some(checkpoint))
 }
 
-pub fn save_checkpoint(path: &str, state: &InstallState, completed_stages: &[InstallStage]) -> Result<()> {
+pub fn save_checkpoint(
+    path: &str,
+    state: &InstallState,
+    completed_stages: &[InstallStage],
+) -> Result<()> {
     let checkpoint = InstallCheckpoint {
         completed_stages: completed_stages.to_vec(),
         state: PersistedInstallState::from_install_state(state)?,
@@ -148,12 +152,13 @@ pub fn clear_checkpoint(path: &str) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::pipeline::{InstallStage, InstallState, InstallOptions, InstallationType, UserConfig};
     use crate::logic::disk::{DiskLayout, Partition};
+    use crate::logic::pipeline::{
+        InstallOptions, InstallStage, InstallState, InstallationType, UserConfig,
+    };
     use zeroize::Zeroizing;
 
     fn make_dummy_state() -> InstallState {
@@ -172,7 +177,10 @@ mod tests {
             disk_layout: layout,
             root_encryption_password: Zeroizing::new("encpw".to_string()),
             root_password: Zeroizing::new("rootpw".to_string()),
-            user: UserConfig { username: "user".to_string(), password: Some(Zeroizing::new("userpw".to_string())) },
+            user: UserConfig {
+                username: "user".to_string(),
+                password: Some(Zeroizing::new("userpw".to_string())),
+            },
             options: InstallOptions {
                 installation_type: InstallationType::Minimal,
                 should_format_efi: false,
@@ -225,10 +233,13 @@ mod tests {
         };
 
         let saved_counts_cloned = saved_counts.clone();
-        let mut save_fn = move |completed_stages: &[InstallStage], _state: &InstallState| -> Result<()> {
-            saved_counts_cloned.borrow_mut().push(completed_stages.len());
-            Ok(())
-        };
+        let mut save_fn =
+            move |completed_stages: &[InstallStage], _state: &InstallState| -> Result<()> {
+                saved_counts_cloned
+                    .borrow_mut()
+                    .push(completed_stages.len());
+                Ok(())
+            };
 
         let mut exec = make_checkpointing_executor(&mut completed, &mut save_fn, &mut base);
 
@@ -242,7 +253,10 @@ mod tests {
 
         assert_eq!(completed.len(), 2);
         assert_eq!(&*saved_counts.borrow(), &vec![1, 2]);
-        assert_eq!(&*base_called.borrow(), &vec![InstallStage::DetectHardware, InstallStage::FormatPartitions]);
+        assert_eq!(
+            &*base_called.borrow(),
+            &vec![InstallStage::DetectHardware, InstallStage::FormatPartitions]
+        );
         Ok(())
     }
 }

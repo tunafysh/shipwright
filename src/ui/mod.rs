@@ -171,8 +171,6 @@ pub fn prompt_disk_layout(partitions: &[Partition], is_efi: bool) -> Result<Disk
     })
 }
 
-
-
 #[allow(dead_code)]
 pub fn print_selected_layout(layout: &DiskLayout) {
     println!("Selected partitions:");

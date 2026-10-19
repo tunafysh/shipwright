@@ -1,18 +1,14 @@
+mod engine;
 mod logic;
 mod system;
 mod ui;
-mod engine;
 
 use anyhow::Result;
 use crossterm::style::Stylize;
 use log::{error, info};
- 
 
-use crate::logic::{
-    pipeline::{
-        InstallOptions, InstallPlan, InstallStage, InstallState, PipelineEngine,
-        build_install_plan,
-    },
+use crate::logic::pipeline::{
+    InstallOptions, InstallPlan, InstallStage, InstallState, PipelineEngine, build_install_plan,
 };
 
 use crate::engine::checkpoint_path;
@@ -113,7 +109,9 @@ fn main() -> Result<()> {
 
     PipelineEngine::new(executor).run(
         &mut state,
-        &InstallPlan { stages: stages_to_run },
+        &InstallPlan {
+            stages: stages_to_run,
+        },
     )?;
 
     engine::clear_checkpoint(&cp_path)?;

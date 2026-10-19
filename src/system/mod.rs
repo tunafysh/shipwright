@@ -18,16 +18,19 @@ mod consts;
 use consts::*;
 
 mod util;
-use util::{ensure_line_value, run, run_arch_chroot, spawn, spawn_arch_chroot, arch_chroot_pacman_sync_install};
+use util::{
+    arch_chroot_pacman_sync_install, ensure_line_value, run, run_arch_chroot, spawn,
+    spawn_arch_chroot,
+};
 // Re-export interactive spawn helper implemented in util.rs so callers can use
 // `system::spawn_interactive(...)` while the implementation lives in util.
 pub use util::spawn_interactive;
 
-use crate::{logic::{
-    disk::{Partition, Disk},
+use crate::logic::{
+    disk::{Disk, Partition},
     download,
     pipeline::{InstallStage, InstallState, InstallationType, UserConfig},
-}};
+};
 
 #[derive(Debug, Deserialize)]
 struct Lsblk {
@@ -155,7 +158,6 @@ pub fn prepare_keyring_and_base_tools() -> Result<()> {
             "reflector",
             "btrfs-progs",
             "dosfstools",
-
         ],
     )?;
     Ok(())
@@ -430,7 +432,16 @@ fn configure_system(state: &InstallState) -> Result<()> {
     if state.options.installation_type == InstallationType::KdePlasma {
         arch_chroot_pacman_sync_install(&KDE_PACKAGES)?;
         spawn_arch_chroot(&["systemctl", "enable", "sddm"])?;
-        spawn_arch_chroot(&["lookandfeeltool", "-a", "org.kde.breezedark.desktop"])?;
+        spawn_arch_chroot(&[
+            "weston",
+            "--backend=headless",
+            "--socket=wayland-shipwright",
+            "--idle-time=0",
+            "--",
+            "lookandfeeltool",
+            "-a",
+            "org.kde.breezedark.desktop",
+        ])?;
     }
 
     if state.options.has_battery {
