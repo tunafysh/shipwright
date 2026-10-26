@@ -201,6 +201,7 @@ fn build_fresh_install_state() -> Result<InstallState> {
                     cpu_vendor,
                     partitions: partitions.clone(),
                     disk_layout: chosen_layout,
+                    disk: selected_disk,
                     root_encryption_password,
                     root_password,
                     user,

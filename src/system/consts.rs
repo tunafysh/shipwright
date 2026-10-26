@@ -86,7 +86,7 @@ pub const KDE_PACKAGES: [&str; 26] = [
     "noto-fonts",
     "noto-fonts-emoji",
     "ttf-hack",
-    "weston"
+    "weston",
 ];
 
 pub const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";

@@ -5,7 +5,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::logic::disk::{DiskLayout, Partition};
+use crate::logic::disk::{Disk, DiskLayout, Partition};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallationType {
     Minimal,
@@ -33,6 +33,7 @@ pub struct InstallState {
     pub cpu_vendor: String,
     pub partitions: Vec<Partition>,
     pub disk_layout: DiskLayout,
+    pub disk: Disk,
     pub root_encryption_password: Zeroizing<String>,
     pub root_password: Zeroizing<String>,
     pub user: UserConfig,

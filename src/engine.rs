@@ -1,3 +1,4 @@
+use crate::logic::disk::Disk;
 use crate::logic::pipeline::{InstallStage, InstallState};
 use crate::system;
 use anyhow::Result;
@@ -8,9 +9,11 @@ pub const CHECKPOINT_PATH: &str = "/tmp/shipwright-progress.json";
 pub fn checkpoint_path() -> String {
     std::env::var("SHIPWRIGHT_CHECKPOINT_PATH").unwrap_or_else(|_| CHECKPOINT_PATH.to_string())
 }
-use crate::logic::disk::{DiskLayout, Partition};
-use crate::logic::pipeline::UserConfig;
-use crate::logic::security::{hash_password, verify_password};
+use crate::logic::{
+    disk::{DiskLayout, Partition},
+    pipeline::{InstallOptions, UserConfig},
+    security::{hash_password, verify_password},
+};
 use crate::ui;
 use serde::{Deserialize, Serialize};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
@@ -19,6 +22,7 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 pub struct PersistedInstallState {
     pub cpu_vendor: String,
     pub partitions: Vec<Partition>,
+    pub disk: Disk,
     pub disk_layout: DiskLayout,
     #[serde(default)]
     pub root_encryption_password_hash: Option<String>,
@@ -30,7 +34,7 @@ pub struct PersistedInstallState {
     pub root_encryption_password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_password: Option<String>,
-    pub options: crate::logic::pipeline::InstallOptions,
+    pub options: InstallOptions,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +48,7 @@ impl PersistedInstallState {
         Ok(Self {
             cpu_vendor: state.cpu_vendor.clone(),
             partitions: state.partitions.clone(),
+            disk: state.disk.clone(),
             disk_layout: state.disk_layout.clone(),
             root_encryption_password_hash: Some(hash_password(
                 state.root_encryption_password.as_str(),
@@ -107,6 +112,7 @@ impl PersistedInstallState {
         Ok(InstallState {
             cpu_vendor: self.cpu_vendor,
             partitions: self.partitions,
+            disk: self.disk,
             disk_layout: self.disk_layout,
             root_encryption_password,
             root_password,
@@ -155,7 +161,7 @@ pub fn clear_checkpoint(path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logic::disk::{DiskLayout, Partition};
+    use crate::logic::disk::{Device, Disk, DiskLayout, Partition};
     use crate::logic::pipeline::{
         InstallOptions, InstallStage, InstallState, InstallationType, UserConfig,
     };
@@ -163,6 +169,10 @@ mod tests {
 
     fn make_dummy_state() -> InstallState {
         let root_part = Partition::from_lsblk("sda1", "100G", "uuid-root");
+        let disk = Disk {
+            device: Device::from_name("sda"),
+            size: "10G".to_string(),
+        };
         let layout = DiskLayout {
             efi_partition: None,
             root_partition: root_part.clone(),
@@ -175,6 +185,7 @@ mod tests {
             cpu_vendor: "TestCPU".to_string(),
             partitions: vec![root_part],
             disk_layout: layout,
+            disk,
             root_encryption_password: Zeroizing::new("encpw".to_string()),
             root_password: Zeroizing::new("rootpw".to_string()),
             user: UserConfig {

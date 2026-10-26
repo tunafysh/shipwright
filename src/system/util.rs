@@ -1,9 +1,12 @@
 use anyhow::{Error, Result, anyhow};
+use regex::Regex;
 use std::{
     fs::{read_to_string, write},
     path::Path,
     process::{Command, Stdio},
 };
+
+use crate::logic::disk::Partition;
 
 pub fn ensure_line_value(path: &str, old_line: &str, new_line: &str) -> Result<()> {
     if !Path::new(path).exists() {
@@ -18,7 +21,7 @@ pub fn ensure_line_value(path: &str, old_line: &str, new_line: &str) -> Result<(
     }
 
     let content = read_to_string(path)?;
-    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
     let old_line_trimmed = old_line.trim();
     let new_line_trimmed = new_line.trim();
 
@@ -33,6 +36,54 @@ pub fn ensure_line_value(path: &str, old_line: &str, new_line: &str) -> Result<(
         let commented_new_with_space = format!("# {}", new_line_trimmed);
 
         if trimmed == old_line_trimmed
+            || trimmed == commented_new
+            || trimmed == commented_new_with_space
+        {
+            *line = new_line.to_string();
+            replaced = true;
+            break;
+        }
+    }
+
+    if !replaced {
+        lines.push(new_line.to_string());
+    }
+
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+
+    write(path, updated)?;
+    Ok(())
+}
+
+pub fn ensure_line_value_regex(path: &str, old_line: &str, new_line: &str) -> Result<()> {
+    if !Path::new(path).exists() {
+        if path.starts_with("/mnt/") {
+            return Err(anyhow!(
+                "Config file not found at {}. Refusing to fall back to host path for installer safety.",
+                path
+            ));
+        }
+
+        return Err(anyhow!("Config file not found at {}", path));
+    }
+
+    let content = read_to_string(path)?;
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+    let new_line_trimmed = new_line.trim();
+
+    if lines.iter().any(|line| line.trim() == new_line_trimmed) {
+        return Ok(());
+    }
+
+    let mut replaced = false;
+    let old_pattern = Regex::new(old_line)?;
+    for line in &mut lines {
+        let trimmed = line.trim();
+        let commented_new = format!("#{}", new_line_trimmed);
+        let commented_new_with_space = format!("# {}", new_line_trimmed);
+
+        if old_pattern.is_match(trimmed)
             || trimmed == commented_new
             || trimmed == commented_new_with_space
         {
@@ -126,4 +177,30 @@ pub fn arch_chroot_pacman_sync_install(packages: &[&str]) -> Result<i32> {
     let mut args = vec!["pacman", "-Sy", "--noconfirm"];
     args.extend_from_slice(packages);
     spawn_arch_chroot(&args)
+}
+
+pub fn refresh_uuid(partition: &mut Partition) -> Result<()> {
+    let output = std::process::Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value"])
+        .arg(partition.path())
+        .output()?;
+
+    if !output.status.success() {
+        return Err(Error::msg(format!(
+            "Failed to retrieve filesystem UUID for {}",
+            partition.path()
+        )));
+    }
+
+    let uuid = String::from_utf8(output.stdout)?.trim().to_string();
+
+    if uuid.is_empty() {
+        return Err(Error::msg(format!(
+            "No filesystem UUID found for {}",
+            partition.path()
+        )));
+    }
+
+    partition.set_uuid(uuid);
+    Ok(())
 }

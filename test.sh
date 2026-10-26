@@ -37,3 +37,5 @@ qemu-system-x86_64 \
     -boot order=d \
     -netdev user,id=net0,hostfwd=tcp::2222-:22 \
     -device virtio-net-pci,netdev=net0
+
+rm arch.qcow2

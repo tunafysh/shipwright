@@ -26,11 +26,11 @@ use util::{
 // `system::spawn_interactive(...)` while the implementation lives in util.
 pub use util::spawn_interactive;
 
-use crate::logic::{
+use crate::{logic::{
     disk::{Disk, Partition},
     download,
     pipeline::{InstallStage, InstallState, InstallationType, UserConfig},
-};
+}, system::util::{ensure_line_value_regex, refresh_uuid}};
 
 #[derive(Debug, Deserialize)]
 struct Lsblk {
@@ -353,6 +353,10 @@ fn install_base_packages(state: &InstallState) -> Result<()> {
         pkgs.push(STANDARD_LINUX);
     }
 
+    if is_efi() {
+        pkgs.push("efibootmgr");
+    }
+
     let mut args = vec!["/mnt"];
     args.extend(pkgs);
     spawn("pacstrap", &args, false)?;
@@ -431,15 +435,20 @@ fn configure_system(state: &InstallState) -> Result<()> {
 
     if state.options.installation_type == InstallationType::KdePlasma {
         arch_chroot_pacman_sync_install(&KDE_PACKAGES)?;
+        
+        fs::create_dir("/mnt/etc/sddm.conf.d")?;
+        fs::write("/mnt/etc/sddm.conf.d/theme.conf", "[Theme]\nCurrent=breeze")?;
+
         spawn_arch_chroot(&["systemctl", "enable", "sddm"])?;
+
         spawn_arch_chroot(&[
             "weston",
             "--backend=headless",
             "--socket=wayland-shipwright",
             "--idle-time=0",
             "--",
-            "lookandfeeltool",
-            "-a",
+            "plasma-apply-lookandfeel",
+            "--apply",
             "org.kde.breezedark.desktop",
         ])?;
     }
@@ -467,6 +476,12 @@ fn install_bootloader(state: &InstallState) -> Result<()> {
         "GRUB_DISABLE_OS_PROBER=false",
     )?;
 
+    ensure_line_value_regex(
+        "/mnt/etc/default/grub",
+        "GRUB_CMDLINE_LINUX_DEFAULT*", 
+        "GRUB_CMDLINE_LINUX_DEFAULT=\"\""
+    )?;
+
     ensure_line_value(
         "/mnt/etc/default/grub",
         "GRUB_CMDLINE_LINUX=\"\"",
@@ -488,6 +503,17 @@ fn install_bootloader(state: &InstallState) -> Result<()> {
         "GRUB_THEME=/boot/grub/themes/minegrub-world-selection/theme.txt",
     )?;
 
+    if let Some(recovery) = &state.disk_layout.recovery_partition {
+        let mut config: Vec<String> = fs::read_to_string("/mnt/etc/default/grub")?
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("GRUB_OS_PROBER_SKIP_LIST="))
+            .map(String::from)
+            .collect();
+
+        config.push(format!("GRUB_OS_PROBER_SKIP_LIST=\"{}\"", recovery.uuid));
+
+        fs::write("/mnt/etc/default/grub", config.join("\n") + "\n")?;
+    }
     if state.options.is_efi {
         spawn_arch_chroot(&[
             "grub-install",
@@ -497,8 +523,8 @@ fn install_bootloader(state: &InstallState) -> Result<()> {
         ])?;
         spawn_arch_chroot(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
     } else {
-        let root_disk_path = state.disk_layout.root_partition.path();
-        spawn_arch_chroot(&["grub-install", "--target=i386-pc", root_disk_path.as_str()])?;
+        let disk_path = state.disk.device.path();
+        spawn_arch_chroot(&["grub-install", "--target=i386-pc", disk_path.as_str()])?;
         spawn_arch_chroot(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
     }
 
@@ -555,19 +581,24 @@ fn format_partitions(state: &mut InstallState) -> Result<()> {
     )?;
 
     spawn("mkfs.btrfs", &["/dev/mapper/encrypted_root"], false)?;
+    refresh_uuid(&mut state.disk_layout.root_partition)?;
 
-    if let Some(home) = &state.disk_layout.home_partition {
+    if let Some(home) = &mut state.disk_layout.home_partition {
         spawn("mkfs.btrfs", &[home.path().as_str()], false)?;
+        refresh_uuid(home)?;
     }
 
-    if let Some(swap) = &state.disk_layout.swap_partition {
+    if let Some(swap) = &mut state.disk_layout.swap_partition {
         let swap_path = swap.path();
         spawn("mkswap", &[swap_path.as_str()], false)?;
         spawn("swapon", &[swap_path.as_str()], false)?;
+        refresh_uuid(swap)?;
     }
 
-    if let Some(recovery) = &state.disk_layout.recovery_partition {
+    if let Some(recovery) = &mut state.disk_layout.recovery_partition {
         spawn("mkfs.ext4", &[recovery.path().as_str()], false)?;
+        refresh_uuid(recovery)?;
+
     }
 
     Ok(())
@@ -774,7 +805,7 @@ fn install_recovery_system(state: &InstallState) -> Result<()> {
 
     entry_data.push_str(format!("\n{}", recovery_entry).as_str());
 
-    fs::write(recovery_entry_path, recovery_entry)?;
+    fs::write(recovery_entry_path, entry_data)?;
     // Update GRUB configuration to include the new entry
     spawn_arch_chroot(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
 
