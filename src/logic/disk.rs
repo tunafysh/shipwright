@@ -28,6 +28,7 @@ pub struct Partition {
     pub device: Device,
     pub size: String,
     pub uuid: String,
+    pub partuuid: String,
 }
 
 impl Partition {
@@ -35,11 +36,13 @@ impl Partition {
         name: impl Into<String>,
         size: impl Into<String>,
         uuid: impl Into<String>,
+        partuuid: impl Into<String>
     ) -> Self {
         Self {
             device: Device::from_name(name),
             size: size.into(),
             uuid: uuid.into(),
+            partuuid: partuuid.into()
         }
     }
 

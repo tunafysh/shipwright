@@ -97,7 +97,7 @@ pub const CODE_EDITOR: &str = "visual-studio-code-insiders-bin";
 
 pub const MULTILIB_PACKAGES: [&str; 1] = ["steam"];
 
-pub const RECOVERY_PACKAGES: [&str; 15] = [
+pub const RECOVERY_PACKAGES: [&str; 17] = [
     "btrfs-progs",
     "dosfstools",
     "parted",
@@ -113,6 +113,8 @@ pub const RECOVERY_PACKAGES: [&str; 15] = [
     "gzip",
     "linux-lts",
     "bash",
+    "alpine-base",
+    "nano",
 ];
 
 pub const ADDITIONAL_PACKAGES: [&str; 13] = [

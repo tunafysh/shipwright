@@ -6,11 +6,7 @@ use libcryptsetup_rs::{
 use log::info;
 use serde::Deserialize;
 use std::{
-    env,
-    fs::{self, read_to_string, write},
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    env, fs::{self, Permissions, read_to_string, write}, io::Write, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::{Command, Stdio},
 };
 use zeroize::Zeroizing;
 
@@ -30,7 +26,7 @@ use crate::{logic::{
     disk::{Disk, Partition},
     download,
     pipeline::{InstallStage, InstallState, InstallationType, UserConfig},
-}, system::util::{ensure_line_value_regex, refresh_uuid}};
+}, system::util::{derive_part_number_from_path, ensure_line_value_regex, refresh_uuid}};
 
 #[derive(Debug, Deserialize)]
 struct Lsblk {
@@ -45,6 +41,7 @@ struct LsblkDevice {
     device_type: String,
     children: Option<Vec<LsblkDevice>>,
     uuid: Option<String>,
+    partuuid: Option<String>,
 }
 
 pub fn is_root_user() -> bool {
@@ -97,7 +94,7 @@ pub fn detect_cpu_vendor() -> Option<String> {
 pub fn get_partitions() -> Result<Vec<Partition>> {
     let output = run(
         "lsblk",
-        &["-J", "-o", "NAME,SIZE,TYPE,MODEL,MOUNTPOINT,UUID"],
+        &["-J", "-o", "NAME,SIZE,TYPE,MODEL,MOUNTPOINT,UUID,PARTUUID"],
     )?;
     let parsed: Lsblk = serde_json::from_str(&output)?;
 
@@ -108,6 +105,7 @@ pub fn get_partitions() -> Result<Vec<Partition>> {
                     dev.name.clone(),
                     dev.size.clone(),
                     dev.uuid.unwrap_or_default(),
+                    dev.partuuid.unwrap_or_default(),
                 ));
             }
             if let Some(children) = dev.children {
@@ -441,16 +439,7 @@ fn configure_system(state: &InstallState) -> Result<()> {
 
         spawn_arch_chroot(&["systemctl", "enable", "sddm"])?;
 
-        spawn_arch_chroot(&[
-            "weston",
-            "--backend=headless",
-            "--socket=wayland-shipwright",
-            "--idle-time=0",
-            "--",
-            "plasma-apply-lookandfeel",
-            "--apply",
-            "org.kde.breezedark.desktop",
-        ])?;
+        fs::write("/mnt/etc/xdg/kdeglobals", "[KDE]\nLookAndFeelPackage=org.kde.breezedark.desktop")?;
     }
 
     if state.options.has_battery {
@@ -492,16 +481,19 @@ fn install_bootloader(state: &InstallState) -> Result<()> {
         .as_str(),
     )?;
 
-    ensure_line_value(
-        "/mnt/etc/default/grub",
-        "#GRUB_TERMINAL_OUTPUT=\"console\"",
-        "GRUB_TERMINAL_OUTPUT=\"gfxterm\"",
-    )?;
-    ensure_line_value(
-        "/mnt/etc/default/grub",
-        "#GRUB_THEME=/path/to/theme.txt",
-        "GRUB_THEME=/boot/grub/themes/minegrub-world-selection/theme.txt",
-    )?;
+    if state.options.installation_type == InstallationType::KdePlasma {
+
+        ensure_line_value(
+            "/mnt/etc/default/grub",
+            "#GRUB_TERMINAL_OUTPUT=\"console\"",
+            "GRUB_TERMINAL_OUTPUT=\"gfxterm\"",
+        )?;
+        ensure_line_value(
+            "/mnt/etc/default/grub",
+            "#GRUB_THEME=/path/to/theme.txt",
+            "GRUB_THEME=/boot/grub/themes/minegrub-world-selection/theme.txt",
+        )?;
+    }
 
     if let Some(recovery) = &state.disk_layout.recovery_partition {
         let mut config: Vec<String> = fs::read_to_string("/mnt/etc/default/grub")?
@@ -520,8 +512,25 @@ fn install_bootloader(state: &InstallState) -> Result<()> {
             "--target=x86_64-efi",
             "--efi-directory=/boot",
             "--bootloader-id=GRUB",
+            "--no-nvram"
         ])?;
         spawn_arch_chroot(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
+
+        if let Some(efi) = state.disk_layout.efi_partition.clone(){
+
+            spawn_arch_chroot(&[
+                "efibootmgr",
+                "--create",
+                "--disk",
+                efi.path().as_str(),
+                "--part",
+                derive_part_number_from_path(efi.path().clone())?.as_str(),
+                "--label",
+                "Mothership",
+                "--loader",
+                "\\EFI\\GRUB\\grubx64.efi"
+                ])?;
+            }
     } else {
         let disk_path = state.disk.device.path();
         spawn_arch_chroot(&["grub-install", "--target=i386-pc", disk_path.as_str()])?;
@@ -796,7 +805,7 @@ fn install_recovery_system(state: &InstallState) -> Result<()> {
     // Adding bootloader entry for recovery system
 
     let recovery_entry = UNFORMATTED_RECOVERY_ENTRY.replace("{{ROOT_UUID}}", &recovery.uuid);
-    let recovery_entry_path = "/mnt/etc/grub.d/40_custom";
+    let recovery_entry_path = "/mnt/etc/grub.d/26_shipwright_recovery";
     let mut entry_data = fs::read_to_string(recovery_entry_path).unwrap_or_default();
     if entry_data.contains(&recovery_entry) {
         info!("Recovery entry already exists in GRUB configuration. Skipping addition.");
@@ -806,6 +815,7 @@ fn install_recovery_system(state: &InstallState) -> Result<()> {
     entry_data.push_str(format!("\n{}", recovery_entry).as_str());
 
     fs::write(recovery_entry_path, entry_data)?;
+    fs::set_permissions(recovery_entry_path, Permissions::from_mode(0o755))?;
     // Update GRUB configuration to include the new entry
     spawn_arch_chroot(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
 

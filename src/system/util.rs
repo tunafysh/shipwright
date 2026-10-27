@@ -204,3 +204,13 @@ pub fn refresh_uuid(partition: &mut Partition) -> Result<()> {
     partition.set_uuid(uuid);
     Ok(())
 }
+
+pub fn derive_part_number_from_path(path: String) -> Result<String> {
+    let res = Regex::new(r#"^(/dev/.*?)(?:p)?(\d+)$"#)?
+        .captures(&path)
+        .and_then(|caps| caps.get(2))
+        .ok_or(anyhow!("Failed to derive partition number from "))?
+        .as_str()
+        .to_string();
+    Ok(res)
+}

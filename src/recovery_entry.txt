@@ -1,10 +1,15 @@
+#!/bin/sh
+exec tail -n +3 $0
+
 # BEGIN SHIPWRIGHT RECOVERY ENTRY
 menuentry "Shipwright Recovery (Alpine)" {
     insmod ext2
 
     search --no-floppy --fs-uuid --set=root {{ROOT_UUID}}
 
+    echo "Booting recovery kernel"
     linux /boot/vmlinuz-lts root=UUID={{ROOT_UUID}} rw
+    echo "Booting recovery ramdisk"
     initrd /boot/initramfs-lts
 }
 # END SHIPWRIGHT RECOVERY ENTRY

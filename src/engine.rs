@@ -168,7 +168,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     fn make_dummy_state() -> InstallState {
-        let root_part = Partition::from_lsblk("sda1", "100G", "uuid-root");
+        let root_part = Partition::from_lsblk("sda1", "100G", "uuid-root", "partuuid-root");
         let disk = Disk {
             device: Device::from_name("sda"),
             size: "10G".to_string(),
